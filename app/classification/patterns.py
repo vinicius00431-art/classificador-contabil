@@ -25,26 +25,26 @@ class Pattern:
     ativo: bool
 
 
-def add_pattern(tipo: str, valor: str, conta_codigo: str, conta_descricao: str) -> int:
+def add_pattern(usuario_id: int, tipo: str, valor: str, conta_codigo: str, conta_descricao: str) -> int:
     if tipo not in TIPOS_VALIDOS:
         raise ValueError(f"Tipo de padrão inválido: {tipo}. Use um de {TIPOS_VALIDOS}")
     valor_normalizado = normalize_text(valor) if tipo != "expressao" else valor.strip()
     with get_connection() as conn:
         cursor = conn.execute(
-            "INSERT INTO patterns (tipo, valor, conta_codigo, conta_descricao, ativo, criado_em) "
-            "VALUES (?, ?, ?, ?, 1, ?)",
-            (tipo, valor_normalizado, conta_codigo.strip(), conta_descricao.strip(), now_iso()),
+            "INSERT INTO patterns (usuario_id, tipo, valor, conta_codigo, conta_descricao, ativo, criado_em) "
+            "VALUES (?, ?, ?, ?, ?, 1, ?)",
+            (usuario_id, tipo, valor_normalizado, conta_codigo.strip(), conta_descricao.strip(), now_iso()),
         )
         return cursor.lastrowid
 
 
-def list_patterns(apenas_ativos: bool = False) -> list[Pattern]:
-    query = "SELECT * FROM patterns"
+def list_patterns(usuario_id: int, apenas_ativos: bool = False) -> list[Pattern]:
+    query = "SELECT * FROM patterns WHERE usuario_id = ?"
     if apenas_ativos:
-        query += " WHERE ativo = 1"
+        query += " AND ativo = 1"
     query += " ORDER BY id DESC"
     with get_connection() as conn:
-        rows = conn.execute(query).fetchall()
+        rows = conn.execute(query, (usuario_id,)).fetchall()
     return [
         Pattern(
             id=row["id"], tipo=row["tipo"], valor=row["valor"],
@@ -55,7 +55,7 @@ def list_patterns(apenas_ativos: bool = False) -> list[Pattern]:
     ]
 
 
-def update_pattern(pattern_id: int, **fields) -> None:
+def update_pattern(pattern_id: int, usuario_id: int, **fields) -> None:
     if not fields:
         return
     allowed = {"tipo", "valor", "conta_codigo", "conta_descricao", "ativo"}
@@ -65,20 +65,22 @@ def update_pattern(pattern_id: int, **fields) -> None:
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     with get_connection() as conn:
         conn.execute(
-            f"UPDATE patterns SET {set_clause} WHERE id = ?",
-            (*updates.values(), pattern_id),
+            f"UPDATE patterns SET {set_clause} WHERE id = ? AND usuario_id = ?",
+            (*updates.values(), pattern_id, usuario_id),
         )
 
 
-def delete_pattern(pattern_id: int) -> None:
+def delete_pattern(pattern_id: int, usuario_id: int) -> None:
     with get_connection() as conn:
-        conn.execute("DELETE FROM patterns WHERE id = ?", (pattern_id,))
+        conn.execute(
+            "DELETE FROM patterns WHERE id = ? AND usuario_id = ?", (pattern_id, usuario_id)
+        )
 
 
-def match_pattern(lancamento: LancamentoExtrato) -> Optional[Pattern]:
-    """Retorna o padrão cadastrado mais específico (mais longo) que casar com o lançamento."""
+def match_pattern(lancamento: LancamentoExtrato, usuario_id: int) -> Optional[Pattern]:
+    """Retorna o padrão cadastrado (do usuário) mais específico que casar com o lançamento."""
     candidatos: list[Pattern] = []
-    for pattern in list_patterns(apenas_ativos=True):
+    for pattern in list_patterns(usuario_id, apenas_ativos=True):
         if _pattern_matches(pattern, lancamento):
             candidatos.append(pattern)
     if not candidatos:

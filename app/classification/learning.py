@@ -36,19 +36,20 @@ def _chave_aprendizado(lancamento: LancamentoExtrato) -> str:
 
 
 def record_correction(
+    usuario_id: int,
     lancamento: LancamentoExtrato,
     conta_sugerida: str | None,
     conta_corrigida: str,
     conta_corrigida_descricao: str,
 ) -> None:
-    """Grava a correção feita pelo usuário e reforça a regra de aprendizado."""
+    """Grava a correção feita pelo usuário e reforça a regra de aprendizado (isolada por usuário)."""
     with get_connection() as conn:
         conn.execute(
             "INSERT INTO correction_log "
-            "(data_lancamento, historico, valor, conta_sugerida, conta_corrigida, "
-            " conta_corrigida_descricao, criado_em) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(usuario_id, data_lancamento, historico, valor, conta_sugerida, conta_corrigida, "
+            " conta_corrigida_descricao, criado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                lancamento.data.isoformat(), lancamento.historico, lancamento.valor,
+                usuario_id, lancamento.data.isoformat(), lancamento.historico, lancamento.valor,
                 conta_sugerida, conta_corrigida, conta_corrigida_descricao, now_iso(),
             ),
         )
@@ -56,32 +57,35 @@ def record_correction(
         chave = _chave_aprendizado(lancamento)
         if not chave:
             return
-        row = conn.execute("SELECT * FROM learned_rules WHERE chave = ?", (chave,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM learned_rules WHERE usuario_id = ? AND chave = ?", (usuario_id, chave)
+        ).fetchone()
         if row:
             conn.execute(
                 "UPDATE learned_rules SET conta_codigo = ?, conta_descricao = ?, "
-                "ocorrencias = ocorrencias + 1, atualizado_em = ? WHERE chave = ?",
-                (conta_corrigida, conta_corrigida_descricao, now_iso(), chave),
+                "ocorrencias = ocorrencias + 1, atualizado_em = ? WHERE usuario_id = ? AND chave = ?",
+                (conta_corrigida, conta_corrigida_descricao, now_iso(), usuario_id, chave),
             )
         else:
             conn.execute(
-                "INSERT INTO learned_rules (chave, conta_codigo, conta_descricao, ocorrencias, atualizado_em) "
-                "VALUES (?, ?, ?, 1, ?)",
-                (chave, conta_corrigida, conta_corrigida_descricao, now_iso()),
+                "INSERT INTO learned_rules (usuario_id, chave, conta_codigo, conta_descricao, "
+                "ocorrencias, atualizado_em) VALUES (?, ?, ?, ?, 1, ?)",
+                (usuario_id, chave, conta_corrigida, conta_corrigida_descricao, now_iso()),
             )
-    logger.info("Correção registrada para chave=%r -> conta=%s", chave, conta_corrigida)
+    logger.info("Correção registrada (usuario_id=%s) para chave=%r -> conta=%s", usuario_id, chave, conta_corrigida)
 
 
-def find_learned_rule(lancamento: LancamentoExtrato) -> Optional[LearnedRule]:
-    """Prioridade 2/4: procura regra aprendida a partir de correções anteriores."""
+def find_learned_rule(lancamento: LancamentoExtrato, usuario_id: int) -> Optional[LearnedRule]:
+    """Prioridade 2/4: procura regra aprendida (do usuário) a partir de correções anteriores."""
     favorecido = extract_possible_favorecido(lancamento.historico_normalizado)
     candidatos_chave = [k for k in (favorecido, lancamento.historico_normalizado) if k]
 
     with get_connection() as conn:
         for chave in candidatos_chave:
             row = conn.execute(
-                "SELECT conta_codigo, conta_descricao, ocorrencias FROM learned_rules WHERE chave = ?",
-                (chave,),
+                "SELECT conta_codigo, conta_descricao, ocorrencias FROM learned_rules "
+                "WHERE usuario_id = ? AND chave = ?",
+                (usuario_id, chave),
             ).fetchone()
             if row:
                 return LearnedRule(

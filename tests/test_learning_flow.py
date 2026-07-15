@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import db
+from app import auth, db
 from app.classification.engine import ClassificationSettings, classificar_lancamento
 from app.classification.learning import record_correction
 from app.importers.extrato import load_extrato
@@ -18,6 +18,8 @@ BASE = Path(__file__).resolve().parent.parent / "sample_data"
 
 def main() -> None:
     db.init_db()
+    usuario = auth.create_user("teste_aprendizado", "senha123", "Usuário de Teste")
+
     extrato = load_extrato(str(BASE / "extrato_exemplo.csv"), "extrato_exemplo.csv")
     razao = load_razao(str(BASE / "razao_exemplo.csv"), "razao_exemplo.csv")
     settings = ClassificationSettings(
@@ -27,13 +29,13 @@ def main() -> None:
     )
 
     alvo = next(l for l in extrato if "XPTO" in l.historico)
-    antes = classificar_lancamento(alvo, razao, settings)
+    antes = classificar_lancamento(alvo, razao, settings, usuario.id)
     print(f"Antes da correção: origem={antes.origem.value} conta={antes.conta_codigo} confianca={antes.confianca}")
     assert antes.origem == OrigemClassificacao.ADIANTAMENTOS, "esperado cair em Adiantamentos antes da correção"
 
-    record_correction(alvo, antes.conta_codigo, "5.9.9.099", "Despesas Diversas XPTO")
+    record_correction(usuario.id, alvo, antes.conta_codigo, "5.9.9.099", "Despesas Diversas XPTO")
 
-    depois = classificar_lancamento(alvo, razao, settings)
+    depois = classificar_lancamento(alvo, razao, settings, usuario.id)
     print(f"Depois da correção: origem={depois.origem.value} conta={depois.conta_codigo} confianca={depois.confianca}")
     assert depois.origem == OrigemClassificacao.APRENDIZADO, "esperado origem Aprendizado após correção"
     assert depois.conta_codigo == "5.9.9.099"

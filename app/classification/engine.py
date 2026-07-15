@@ -30,11 +30,12 @@ def classificar_lancamento(
     lancamento: LancamentoExtrato,
     razao: list[LancamentoRazao],
     settings: ClassificationSettings,
+    usuario_id: int,
 ) -> ClassificacaoResultado:
     """Aplica, em ordem, as regras de prioridade descritas na especificação."""
 
     # Padrões manuais cadastrados têm precedência absoluta (regra explícita do usuário).
-    pattern = patterns.match_pattern(lancamento)
+    pattern = patterns.match_pattern(lancamento, usuario_id)
     if pattern:
         return ClassificacaoResultado(
             lancamento=lancamento,
@@ -46,7 +47,7 @@ def classificar_lancamento(
         )
 
     # Aprendizado de correções anteriores do usuário.
-    learned = learning.find_learned_rule(lancamento)
+    learned = learning.find_learned_rule(lancamento, usuario_id)
     if learned:
         return ClassificacaoResultado(
             lancamento=lancamento,
@@ -130,9 +131,10 @@ def classificar_extrato(
     lancamentos: list[LancamentoExtrato],
     razao: list[LancamentoRazao],
     settings: ClassificationSettings,
+    usuario_id: int,
 ) -> list[ClassificacaoResultado]:
-    resultados = [classificar_lancamento(l, razao, settings) for l in lancamentos]
-    logger.info("Classificados %d lançamentos do extrato", len(resultados))
+    resultados = [classificar_lancamento(l, razao, settings, usuario_id) for l in lancamentos]
+    logger.info("Classificados %d lançamentos do extrato (usuario_id=%s)", len(resultados), usuario_id)
     return resultados
 
 

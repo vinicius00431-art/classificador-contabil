@@ -9,7 +9,7 @@ import logging
 import pandas as pd
 import streamlit as st
 
-from app import db
+from app import auth, db
 from app.classification import patterns as patterns_module
 from app.classification.engine import ClassificationSettings, classificar_extrato, generate_report
 from app.classification.learning import record_correction
@@ -17,7 +17,7 @@ from app.export.excel_export import build_export_dataframe, export_to_excel_byte
 from app.importers.balancete import load_balancete
 from app.importers.extrato import load_extrato
 from app.importers.razao import load_razao
-from app.models import ClassificacaoResultado, OrigemClassificacao
+from app.models import ClassificacaoResultado
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("streamlit_app")
@@ -28,6 +28,7 @@ db.init_db()
 
 def _init_session_state() -> None:
     defaults = {
+        "usuario": None,
         "extrato_lancamentos": [],
         "razao_lancamentos": [],
         "balancete_contas": [],
@@ -42,8 +43,57 @@ def _init_session_state() -> None:
 _init_session_state()
 
 
+# --------------------------------------------------------------------------- #
+# Autenticação — cada conta tem seus próprios padrões, aprendizado e configs
+# --------------------------------------------------------------------------- #
+def _render_auth_gate() -> None:
+    st.title("📑 Classificador Contábil de Extratos Bancários")
+    st.caption("Entre com sua conta ou crie uma nova para começar.")
+
+    tab_entrar, tab_criar = st.tabs(["🔑 Entrar", "🆕 Criar Conta"])
+
+    with tab_entrar:
+        with st.form("form_login"):
+            username = st.text_input("Usuário")
+            password = st.text_input("Senha", type="password")
+            if st.form_submit_button("Entrar", type="primary"):
+                usuario = auth.verify_user(username, password)
+                if usuario:
+                    st.session_state.usuario = usuario
+                    st.rerun()
+                else:
+                    st.error("Usuário ou senha inválidos.")
+
+    with tab_criar:
+        with st.form("form_criar_conta"):
+            novo_nome = st.text_input("Seu nome (exibição)")
+            novo_username = st.text_input("Escolha um nome de usuário")
+            nova_senha = st.text_input("Escolha uma senha", type="password")
+            confirmar_senha = st.text_input("Confirme a senha", type="password")
+            if st.form_submit_button("Criar Conta", type="primary"):
+                if not novo_username or not nova_senha:
+                    st.error("Preencha usuário e senha.")
+                elif nova_senha != confirmar_senha:
+                    st.error("As senhas não conferem.")
+                else:
+                    try:
+                        usuario = auth.create_user(novo_username, nova_senha, novo_nome)
+                        st.session_state.usuario = usuario
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+
+
+if not st.session_state.usuario:
+    _render_auth_gate()
+    st.stop()
+
+usuario = st.session_state.usuario
+usuario_id = usuario.id
+
+
 def _load_settings() -> ClassificationSettings:
-    settings = db.get_all_settings()
+    settings = db.get_all_settings(usuario_id)
     return ClassificationSettings(
         tolerancia_dias=int(settings.get("tolerancia_dias_data", 3)),
         limiar_fuzzy=float(settings.get("limiar_fuzzy_historico", 80)),
@@ -71,11 +121,20 @@ def _resultados_to_dataframe(resultados: list[ClassificacaoResultado]) -> pd.Dat
     return pd.DataFrame(linhas)
 
 
-st.title("📑 Classificador Contábil de Extratos Bancários")
-st.caption(
-    "Importe o extrato, o razão e o balancete do período para classificar automaticamente "
-    "cada lançamento na conta contábil correta."
-)
+col_titulo, col_usuario = st.columns([5, 1])
+with col_titulo:
+    st.title("📑 Classificador Contábil de Extratos Bancários")
+    st.caption(
+        "Importe o extrato, o razão e o balancete do período para classificar automaticamente "
+        "cada lançamento na conta contábil correta."
+    )
+with col_usuario:
+    st.write("")
+    st.write(f"👤 **{usuario.nome_exibicao}**")
+    if st.button("Sair", width="stretch"):
+        st.session_state.usuario = None
+        st.session_state.processado = False
+        st.rerun()
 
 tab_importar, tab_resultados, tab_padroes, tab_config = st.tabs(
     ["📥 Importar & Processar", "📊 Resultados", "🧩 Cadastro de Padrões", "⚙️ Configurações"]
@@ -125,7 +184,9 @@ with tab_importar:
                 else:
                     with st.spinner("Classificando lançamentos..."):
                         settings = _load_settings()
-                        resultados = classificar_extrato(extrato_lancamentos, razao_lancamentos, settings)
+                        resultados = classificar_extrato(
+                            extrato_lancamentos, razao_lancamentos, settings, usuario_id
+                        )
 
                     st.session_state.extrato_lancamentos = extrato_lancamentos
                     st.session_state.razao_lancamentos = razao_lancamentos
@@ -194,7 +255,8 @@ with tab_resultados:
                     nova_descricao = df_editado.loc[i, "Descrição da Conta"]
                     if nova_conta != original or nova_descricao != df.loc[i, "Descrição da Conta"]:
                         record_correction(
-                            resultado.lancamento, resultado.conta_codigo, nova_conta, nova_descricao
+                            usuario_id, resultado.lancamento, resultado.conta_codigo,
+                            nova_conta, nova_descricao,
                         )
                         resultado.conta_codigo = nova_conta
                         resultado.conta_descricao = nova_descricao
@@ -210,7 +272,7 @@ with tab_resultados:
         with col_export:
             centro_custo = st.text_input("Centro de Custo (opcional, aplicado a todas as linhas)", "")
             filial = st.text_input("Filial (opcional, aplicada a todas as linhas)", "")
-            settings_db = db.get_all_settings()
+            settings_db = db.get_all_settings(usuario_id)
             export_df = build_export_dataframe(
                 resultados, settings_db.get("conta_banco_codigo", ""), centro_custo, filial
             )
@@ -230,7 +292,7 @@ with tab_padroes:
     st.subheader("Cadastro de Padrões")
     st.caption(
         "Sempre que um destes padrões aparecer no histórico do extrato, a conta correspondente "
-        "será usada automaticamente (maior prioridade de classificação)."
+        "será usada automaticamente (maior prioridade de classificação). Visível só para sua conta."
     )
 
     with st.form("form_novo_padrao", clear_on_submit=True):
@@ -241,14 +303,14 @@ with tab_padroes:
         conta_descricao = c4.text_input("Descrição da Conta")
         if st.form_submit_button("➕ Adicionar Padrão"):
             if valor and conta_codigo and conta_descricao:
-                patterns_module.add_pattern(tipo, valor, conta_codigo, conta_descricao)
+                patterns_module.add_pattern(usuario_id, tipo, valor, conta_codigo, conta_descricao)
                 st.success("Padrão adicionado.")
                 st.rerun()
             else:
                 st.error("Preencha todos os campos.")
 
     st.divider()
-    lista_padroes = patterns_module.list_patterns()
+    lista_padroes = patterns_module.list_patterns(usuario_id)
     if lista_padroes:
         for p in lista_padroes:
             c1, c2, c3, c4, c5 = st.columns([1, 2, 1, 2, 1])
@@ -257,7 +319,7 @@ with tab_padroes:
             c3.write(p.conta_codigo)
             c4.write(p.conta_descricao)
             if c5.button("🗑️ Remover", key=f"del_pattern_{p.id}"):
-                patterns_module.delete_pattern(p.id)
+                patterns_module.delete_pattern(p.id, usuario_id)
                 st.rerun()
     else:
         st.info("Nenhum padrão cadastrado ainda.")
@@ -267,7 +329,7 @@ with tab_padroes:
 # --------------------------------------------------------------------------- #
 with tab_config:
     st.subheader("Configurações do Motor de Classificação")
-    settings_db = db.get_all_settings()
+    settings_db = db.get_all_settings(usuario_id)
 
     with st.form("form_configuracoes"):
         conta_adiantamentos_codigo = st.text_input(
@@ -299,11 +361,11 @@ with tab_config:
             min_value=0, max_value=100, value=int(float(settings_db.get("limiar_confianca_minima", 60))),
         )
         if st.form_submit_button("💾 Salvar Configurações"):
-            db.set_setting("conta_adiantamentos_codigo", conta_adiantamentos_codigo)
-            db.set_setting("conta_adiantamentos_descricao", conta_adiantamentos_descricao)
-            db.set_setting("conta_banco_codigo", conta_banco_codigo)
-            db.set_setting("conta_banco_descricao", conta_banco_descricao)
-            db.set_setting("tolerancia_dias_data", str(tolerancia_dias))
-            db.set_setting("limiar_fuzzy_historico", str(limiar_fuzzy))
-            db.set_setting("limiar_confianca_minima", str(limiar_confianca_minima))
+            db.set_setting(usuario_id, "conta_adiantamentos_codigo", conta_adiantamentos_codigo)
+            db.set_setting(usuario_id, "conta_adiantamentos_descricao", conta_adiantamentos_descricao)
+            db.set_setting(usuario_id, "conta_banco_codigo", conta_banco_codigo)
+            db.set_setting(usuario_id, "conta_banco_descricao", conta_banco_descricao)
+            db.set_setting(usuario_id, "tolerancia_dias_data", str(tolerancia_dias))
+            db.set_setting(usuario_id, "limiar_fuzzy_historico", str(limiar_fuzzy))
+            db.set_setting(usuario_id, "limiar_confianca_minima", str(limiar_confianca_minima))
             st.success("Configurações salvas. Reprocesse o extrato para aplicar as mudanças.")
